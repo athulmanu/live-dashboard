@@ -14,7 +14,7 @@ npm run check      # type-check + lint + format check + tests
 npm run build      # type-check + production build
 ```
 
-Requires Node 18+.
+Requires Node 20.19+ or 22.13+ (needed by ESLint 10; the app itself runs on Node 18+).
 
 ### Configuration
 
@@ -44,8 +44,9 @@ The WebSocket endpoint should send one JSON object per frame:
 - **Filters**: time window (1/5/15 min or the whole buffer), severity toggles, and text search.
 - **Settings**: buffer size (500 to 10,000 events) and UI update interval (100 to 1,000 ms), both changeable at runtime.
 - **KPIs**: events in window, rate per second, average and p95 latency, healthy/degraded/down counts.
-- **Live chart**: average latency per second (plain SVG).
-- **Events list**: newest first, virtualized.
+- **Live chart**: average latency per second (plain SVG), with a hover tooltip.
+- **Events list**: newest first, virtualized, and held still while the user is reading it.
+- **States**: skeleton loading, a stale-data banner when disconnected, empty states with a "Reset filters" action, and per-panel error fallbacks.
 - **Stress-test panel** (simulated feed only): a 2,000 msg/s burst, dropping the connection, flapping, killing and restoring the feed, and hostile data (malformed JSON, schema violations, oversized messages, XSS payloads, prototype-pollution attempts).
 
 ## Architecture
@@ -65,7 +66,8 @@ src/
 ├── hooks/
 │   ├── useLiveStream.ts      creates the stream, owns its lifecycle; useLiveSelector
 │   ├── useFilters.ts         filter state (search value is deferred)
-│   └── useNow.ts             clock for the retry countdown only
+│   ├── useMediaQuery.ts      responsive switches (e.g. compact list rows)
+│   └── useNow.ts             ticking clock for countdowns and "Xs ago" labels only
 ├── components/               presentational, memoized widgets
 ├── App.tsx
 └── main.tsx
@@ -88,14 +90,14 @@ The UI never touches the socket. The client and store are plain TypeScript class
    - The pending queue is also capped. It only grows during bursts, while paused, or in a background tab; overflow drops the oldest messages and is counted as "Dropped".
    - The chart is bucketed per second and capped at 300 points.
 3. **Isolated re-renders.**
-   - Each component subscribes through `useSyncExternalStore` with a selector, so it re-renders only when its slice changes reference. Connection changes and the countdown re-render the connection bar only, not the chart or list.
+   - Each component subscribes through `useSyncExternalStore` with a selector, so it re-renders only when its slice changes reference. The retry countdown and stats counters re-render the connection bar only, not the chart or list.
    - Widgets are wrapped in `React.memo`.
    - Derived data (filtered events, KPIs, chart points) is computed with `useMemo` and never duplicated into state.
 4. **Virtualized list** (`@tanstack/react-virtual`). Only about 20 rows are in the DOM whatever the buffer size, with stable keys from event IDs.
 5. **Lightweight chart.** A single SVG `<path>` with no animations. A charting library adds bundle weight and per-update animation work that queues up under load, and is unnecessary for one series.
 6. **Deferred search.** `useDeferredValue` keeps typing responsive while large buffers are filtered.
 
-**Measured** (simulated burst at 2,000 msg/s for 5 s, `flushMs` 250, buffer 2,000): about 8,800 messages processed in 6 s, the UI stayed responsive, the buffer held at exactly 2,000 events, 18 list rows were in the DOM, and the console showed no errors or warnings. Turn on "Highlight updates" in the React DevTools Profiler to see that the connection bar and data widgets update independently.
+**Measured** (simulated burst at 2,000 msg/s for 5 s, `flushMs` 250, buffer 2,000): about 8,800 messages processed in 6 s, the UI stayed responsive, the buffer held at exactly 2,000 events, 18 list rows were in the DOM, and the console showed no errors or warnings. A unit test (`liveStore.test.ts`) asserts that a burst of 500 messages produces exactly one store update per flush. To see re-render isolation in the browser, enable "Highlight updates when components render" in React DevTools settings.
 
 ## Security decisions
 
@@ -111,7 +113,7 @@ The UI never touches the socket. The client and store are plain TypeScript class
    A fresh object is built from known fields only, so unknown keys and `__proto__` never pass through. Invalid messages are dropped and counted, never logged.
 
 2. **XSS-safe rendering.** No `dangerouslySetInnerHTML`, and stream data never goes into `href`, `src` or `style`. All text renders as React text nodes, which React escapes. The "Hostile data" mode injects `<img onerror>` and `<script>` payloads; they appear as literal text.
-3. **No secrets in the client.** No keys or tokens are hard-coded or put in env vars. If the socket needs auth, the token is read from memory at connect time and sent as the first frame, never in the URL (which would leak into logs, history and Referer headers). The URL must be `ws:` or `wss:`.
+3. **No secrets in the client.** No keys or tokens are hard-coded or put in env vars. The WebSocket transport takes a `getToken` callback (currently returning `null`, as the demo feed needs no auth): the token is read from memory at connect time and sent as the first frame, never in the URL (which would leak into logs, history and Referer headers). The URL must be `ws:` or `wss:`.
 4. **Controlled reconnection.**
    - Exponential backoff with full jitter, capped at 15 s, and at most 8 attempts before an explicit error state with a manual retry.
    - The backoff resets only after the connection has stayed up for 5 s, so a flapping server can't cause a reconnect storm.
@@ -129,7 +131,7 @@ For production, also serve a strict Content-Security-Policy header (`default-src
 - **Reconnect gaps.** Events missed while disconnected are not replayed. A real backend could support resuming from the last event ID.
 - **React StrictMode** is on. The stream connects in `useEffect` and disconnects in cleanup, so the dev-mode double mount never leaves two connections open.
 - **Error boundaries.** Each data panel (KPIs, chart, events) has its own boundary, so a render error replaces only that panel with a "Try again" card and the stream keeps running. An app-level boundary catches anything else. Fallbacks never show error messages or stacks.
-- **Linting as a guardrail.** Besides the TypeScript and React Hooks rules, ESLint fails the build on `dangerouslySetInnerHTML`, `innerHTML`, `eval`/`new Function`, and any `console.*` call, so the security rules above are enforced, not just documented.
+- **Linting as a guardrail.** Besides the TypeScript and React Hooks rules, ESLint reports an error (failing `npm run lint` and `npm run check`) on `dangerouslySetInnerHTML`, `innerHTML`, `eval`/`new Function`, and any `console.*` call, so the security rules above are enforced, not just documented.
 
 ## Libraries
 
